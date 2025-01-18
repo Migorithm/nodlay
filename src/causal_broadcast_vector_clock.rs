@@ -7,24 +7,55 @@ use tokio::sync::mpsc::Sender;
 use tokio::sync::RwLock;
 use tokio::time::sleep;
 
+#[derive(Clone, Debug)]
+struct Message {
+    sender: usize,
+    vector_clock: Vec<i32>,
+}
+
 fn node(
     order_in_cluster: usize,
-    outbound_channels: Vec<Sender<Vec<i32>>>,
-    mut recv: Receiver<Vec<i32>>,
+    outbound_channels: Vec<Sender<Message>>,
+    mut recv: Receiver<Message>,
 ) {
     let vc = Arc::new(RwLock::new(vec![0, 0, 0]));
     tokio::spawn({
         let vc_for_recv = vc.clone();
         async move {
+            let mut buffer: Vec<Message> = Vec::new();
             while let Some(msg) = recv.recv().await {
-                println!("Node {} received {:?}", order_in_cluster + 1, msg);
                 let mut vc = vc_for_recv.write().await;
 
-                if let Err(err) = take_pointwise_max(order_in_cluster, vc.clone(), msg.clone()) {
-                    println!("{}", err);
-                    // TODO: Buffering logic
+                if let Err(err) = take_pointwise_max(vc.clone(), msg.clone()) {
+                    println!(
+                        "Node {} detected concurrency...
+                        self : {:?}
+                        other: {:?}",
+                        order_in_cluster + 1,
+                        vc,
+                        msg
+                    );
+                    buffer.push(msg);
+                    println!("Buffered message: {:?}", buffer);
                 } else {
-                    *vc = msg;
+                    println!("Node {} received {:?}", order_in_cluster + 1, msg);
+                    vc[msg.sender] += 1;
+
+                    let mut idx = -1;
+                    for (order, x) in buffer.iter().enumerate() {
+                        if let Ok(found) = take_pointwise_max(vc.clone(), x.clone()) {
+                            println!(
+                                "Node {} found buffered vector clock {:?}\nreplaying message",
+                                order_in_cluster + 1,
+                                x
+                            );
+                            *vc = found;
+                            idx = order as i32;
+                        }
+                    }
+                    if idx != -1 {
+                        buffer.remove(idx as usize);
+                    }
                 }
             }
         }
@@ -39,7 +70,14 @@ fn node(
                 }
                 for channel in outbound_channels.iter() {
                     let vc = vc_for_send.read().await.clone();
-                    if channel.send(vc).await.is_err() {
+                    if channel
+                        .send(Message {
+                            sender: order_in_cluster,
+                            vector_clock: vc,
+                        })
+                        .await
+                        .is_err()
+                    {
                         eprintln!("Failed to send vector clock");
                     }
                 }
@@ -50,24 +88,22 @@ fn node(
     });
 }
 
-fn take_pointwise_max(
-    order_in_cluster: usize,
-    self_vc: Vec<i32>,
-    other_vc: Vec<i32>,
-) -> Result<Vec<i32>, String> {
-    for (index, (&self_elem, &other_elem)) in self_vc.iter().zip(&other_vc).enumerate() {
-        if index != order_in_cluster && self_elem > other_elem {
-            return Err(format!(
-                "--------------Concurrent events detected---------------\n\
-Node {} detected concurrent events\n\
-self vc: {self_vc:?}\n\
-received vc: {other_vc:?}\n\
--------------------------------------------------------",
-                order_in_cluster + 1
-            ));
+fn take_pointwise_max(self_vc: Vec<i32>, other_vc: Message) -> Result<Vec<i32>, ()> {
+    //A message sent by P1 is only delivered to P2 if the followings are met:
+    //VC[P1] on P1 == VC[P1] +1 on P2
+    //AND
+    //T[Pk] on P1 <= VC[Pk] on P2 for all K != 1.
+
+    if self_vc[other_vc.sender] + 1 == other_vc.vector_clock[other_vc.sender] {
+        for (idx, x) in self_vc.iter().enumerate() {
+            if idx != other_vc.sender && x > &other_vc.vector_clock[idx] {
+                return Err(());
+            }
         }
+        Ok(other_vc.vector_clock)
+    } else {
+        Err(())
     }
-    Ok(other_vc)
 }
 
 #[tokio::test]
