@@ -13,43 +13,38 @@ fn node(
     mut recv: Receiver<Vec<i32>>,
 ) {
     let vc = Arc::new(RwLock::new(vec![0, 0, 0]));
-
     tokio::spawn({
         let vc_for_recv = vc.clone();
         async move {
             while let Some(msg) = recv.recv().await {
-                println!(
-                    "Node {} received vector clock: {:?}",
-                    order_in_cluster + 1,
-                    msg
-                );
+                println!("Node {} received {:?}", order_in_cluster + 1, msg);
                 let mut vc = vc_for_recv.write().await;
-                match take_pointwise_max(order_in_cluster, vc.clone(), msg.clone()) {
-                    Ok(max) => {
-                        *vc = max;
-                    }
-                    Err(msg) => {
-                        println!("{}", msg);
-                        //TODO buffering logic
-                    }
-                };
+
+                if let Err(err) = take_pointwise_max(order_in_cluster, vc.clone(), msg.clone()) {
+                    println!("{}", err);
+                    // TODO: Buffering logic
+                } else {
+                    *vc = msg;
+                }
             }
         }
     });
-
     tokio::spawn({
         let vc_for_send = vc.clone();
         async move {
             loop {
-                let mut vc = vc_for_send.write().await;
-
-                vc[order_in_cluster] += 1;
-
-                for i in outbound_channels.iter() {
-                    let vc = vc.clone();
-                    i.send(vc).await.unwrap();
+                {
+                    let mut vc = vc_for_send.write().await;
+                    vc[order_in_cluster] += 1;
                 }
-                sleep(Duration::from_secs(rand::random::<u64>() % 4)).await;
+                for channel in outbound_channels.iter() {
+                    let vc = vc_for_send.read().await.clone();
+                    if channel.send(vc).await.is_err() {
+                        eprintln!("Failed to send vector clock");
+                    }
+                }
+                let delay = rand::random::<u64>() % 4;
+                sleep(Duration::from_secs(delay)).await;
             }
         }
     });
@@ -60,24 +55,19 @@ fn take_pointwise_max(
     self_vc: Vec<i32>,
     other_vc: Vec<i32>,
 ) -> Result<Vec<i32>, String> {
-    for i in self_vc.iter().zip(other_vc.iter()).enumerate() {
-        let (index, (self_elem, other_elem)) = i;
-        if index == order_in_cluster {
-            continue;
-        }
-        if *self_elem > *other_elem {
-            let msg = format!(
-                "--------------Concurrent events detected---------------\n
-Node {} detected concurrent events\n
-self vc: {self_vc:?}\n
-received vc: {other_vc:?}\n
+    for (index, (&self_elem, &other_elem)) in self_vc.iter().zip(&other_vc).enumerate() {
+        if index != order_in_cluster && self_elem > other_elem {
+            return Err(format!(
+                "--------------Concurrent events detected---------------\n\
+Node {} detected concurrent events\n\
+self vc: {self_vc:?}\n\
+received vc: {other_vc:?}\n\
 -------------------------------------------------------",
                 order_in_cluster + 1
-            );
-            return Err(msg);
+            ));
         }
     }
-    return Ok(other_vc);
+    Ok(other_vc)
 }
 
 #[tokio::test]
