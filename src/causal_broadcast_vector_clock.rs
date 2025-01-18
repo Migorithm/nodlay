@@ -1,23 +1,19 @@
 // In Vector clock, everything such as send and receive counts as an event.
 // In order to implement causal delivery however, we should change the way : WE ONLY TRACT MESSAGE SENDs
+use std::sync::Arc;
+use std::time::Duration;
+use tokio::sync::mpsc::Receiver;
+use tokio::sync::mpsc::Sender;
+use tokio::sync::RwLock;
+use tokio::time::sleep;
 
-use std::{sync::Arc, time::Duration};
-use tokio::{
-    sync::{
-        mpsc::{Receiver, Sender},
-        RwLock,
-    },
-    time::sleep,
-};
-
-async fn node(
+fn node(
     order_in_cluster: usize,
     outbound_channels: Vec<Sender<Vec<i32>>>,
     mut recv: Receiver<Vec<i32>>,
 ) {
     let vc = Arc::new(RwLock::new(vec![0, 0, 0]));
 
-    // receiving process
     tokio::spawn({
         let vc_for_recv = vc.clone();
         async move {
@@ -34,30 +30,26 @@ async fn node(
                     }
                     Err(msg) => {
                         println!("{}", msg);
+                        //TODO buffering logic
                     }
                 };
             }
         }
     });
 
-    // sending process
     tokio::spawn({
         let vc_for_send = vc.clone();
-
         async move {
             loop {
-                // random sleep
                 let mut vc = vc_for_send.write().await;
-                // take max, try to find concurrent events
 
                 vc[order_in_cluster] += 1;
 
-                // send the message to other nodes except for self
                 for i in outbound_channels.iter() {
                     let vc = vc.clone();
                     i.send(vc).await.unwrap();
                 }
-                sleep(Duration::from_secs(rand::random::<u64>() % 20)).await;
+                sleep(Duration::from_secs(rand::random::<u64>() % 4)).await;
             }
         }
     });
@@ -76,10 +68,10 @@ fn take_pointwise_max(
         if *self_elem > *other_elem {
             let msg = format!(
                 "--------------Concurrent events detected---------------\n
-                Node {} detected concurrent events\n
-                self vc: {self_vc:?}\n
-                received vc: {other_vc:?}\n
-                -------------------------------------------------------",
+Node {} detected concurrent events\n
+self vc: {self_vc:?}\n
+received vc: {other_vc:?}\n
+-------------------------------------------------------",
                 order_in_cluster + 1
             );
             return Err(msg);
@@ -94,23 +86,9 @@ pub async fn vector_clock_test() {
     let (tx2, rx2) = tokio::sync::mpsc::channel(10);
     let (tx3, rx3) = tokio::sync::mpsc::channel(10);
 
-    tokio::spawn({
-        let tx2_clone = tx2.clone();
-        let tx3_clone = tx3.clone();
-        node(0, vec![tx2_clone, tx3_clone], rx1)
-    });
+    node(0, vec![tx2.clone(), tx3.clone()], rx1);
+    node(1, vec![tx1.clone(), tx3.clone()], rx2);
+    node(2, vec![tx1.clone(), tx2.clone()], rx3);
 
-    tokio::spawn({
-        let tx1_clone = tx1.clone();
-        let tx3_clone = tx3.clone();
-        node(1, vec![tx1_clone, tx3_clone], rx2)
-    });
-
-    tokio::spawn({
-        let tx1_clone = tx1.clone();
-        let tx2_clone = tx2.clone();
-        node(2, vec![tx1_clone, tx2_clone], rx3)
-    });
-
-    tokio::time::sleep(std::time::Duration::from_secs(100)).await;
+    sleep(Duration::from_secs(10)).await;
 }
