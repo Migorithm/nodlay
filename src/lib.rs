@@ -1,1 +1,1 @@
-pub mod causal_broadcast_vector_clock;
+pub mod vector_clock;
