@@ -18,22 +18,22 @@ async fn node(
     let vc = Arc::new(RwLock::new(vec![0, 0, 0]));
 
     // receiving process
-
     tokio::spawn({
         let vc_for_recv = vc.clone();
         async move {
             while let Some(msg) = recv.recv().await {
-                println!("Node {} received vector clock: {:?}", order_in_cluster, msg);
+                println!(
+                    "Node {} received vector clock: {:?}",
+                    order_in_cluster + 1,
+                    msg
+                );
                 let mut vc = vc_for_recv.write().await;
                 match take_pointwise_max(order_in_cluster, vc.clone(), msg.clone()) {
                     Ok(max) => {
                         *vc = max;
                     }
-                    Err(_) => {
-                        println!("--------------Concurrent events detected---------------");
-                        println!("self vc: {:?}", vc);
-                        println!("received vc: {:?}", msg);
-                        println!("-------------------------------------------------------");
+                    Err(msg) => {
+                        println!("{}", msg);
                     }
                 };
             }
@@ -67,14 +67,22 @@ fn take_pointwise_max(
     order_in_cluster: usize,
     self_vc: Vec<i32>,
     other_vc: Vec<i32>,
-) -> Result<Vec<i32>, &'static str> {
+) -> Result<Vec<i32>, String> {
     for i in self_vc.iter().zip(other_vc.iter()).enumerate() {
         let (index, (self_elem, other_elem)) = i;
         if index == order_in_cluster {
             continue;
         }
         if *self_elem > *other_elem {
-            return Err("Concurrent events detected");
+            let msg = format!(
+                "--------------Concurrent events detected---------------\n
+                Node {} detected concurrent events\n
+                self vc: {self_vc:?}\n
+                received vc: {other_vc:?}\n
+                -------------------------------------------------------",
+                order_in_cluster + 1
+            );
+            return Err(msg);
         }
     }
     return Ok(other_vc);
