@@ -1,14 +1,12 @@
-// In Vector clock, everything such as send and receive counts as an event.
-// In order to implement causal delivery however, we should change the way : WE ONLY TRACT MESSAGE SENDs
+// ! This module is to prove that vector clock cannot solve total delivery anomalies
+use crate::vector_clock::take_pointwise_max;
+use crate::vector_clock::Message;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc::Receiver;
 use tokio::sync::mpsc::Sender;
 use tokio::sync::RwLock;
 use tokio::time::sleep;
-
-use crate::vector_clock::take_pointwise_max;
-use crate::vector_clock::Message;
 
 fn total_anomaly_generating_node(
     order_in_cluster: usize,
